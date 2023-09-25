@@ -14,7 +14,7 @@ from eeggan.helpers.dataloader import Dataloader
 from nn_architecture.models import AutoencoderDiscriminator
 
 empiricalEEG = np.genfromtxt('data/gansEEGTrainingData.csv', delimiter=',', skip_header=1)
-
+empiricalEEGtest = np.genfromtxt('data/gansEEGValidationData.csv', delimiter=',', skip_header=1)
 
 argv = []
 if isinstance(argv,dict):
@@ -83,7 +83,7 @@ generator = TtsGenerator(seq_length=opt['seq_len_generated'],
                                  patch_size=opt['patch_size'],
                                  channels=1)  # TODO: Channel recovery: set channels to number of channels in dataset
 model = Trainer(generator, discriminator, opt)
-model.load_checkpoint("/Users/tail/EEG-GAN/trained_models/gan_5ep_20230904_174007.pt")
+#model.load_checkpoint("/Users/tail/EEG-GAN/trained_models/gan_5ep_20230904_174007.pt")
 ##print(model.discriminator)
 
 
@@ -127,7 +127,7 @@ ourmodel = model.discriminator
 
 optimizer = optim.Adam(ourmodel.parameters(), lr=0.01, weight_decay=0.05)
 criterion = nn.MSELoss()  # Change based on your task
-num_epochs = 50
+num_epochs = 1
 
 Emp_X_Train_tensor = torch.tensor(Emp_X_train, dtype=torch.float32)
 EMP_Y_train_tensor = torch.tensor(Emp_Y_train, dtype=torch.float32)
@@ -149,6 +149,7 @@ from torch.utils.data import DataLoader
 # Create dataset
 dataset = CustomDataset(Emp_X_Train_tensor, EMP_Y_train_tensor)
 
+
 # Create data loader
 batch_size = 32  # adjust based on your needs
 shuffle = True
@@ -158,29 +159,73 @@ dataloader = Dataloader(default_args['path_dataset'],
                             norm_data=norm_data,
                             std_data=std_data,
                             diff_data=diff_data)
+
+testdataloader = Dataloader('data/gansEEGValidationData.csv',
+                            kw_timestep=default_args['kw_timestep_dataset'],
+                            col_label=default_args['conditions'],
+                            norm_data=norm_data,
+                            std_data=std_data,
+                            diff_data=diff_data)
+
+testset = testdataloader.get_data()
+testset = DataLoader(testset, batch_size=32, shuffle=True)
 dataset = dataloader.get_data()
 dataset = DataLoader(dataset, batch_size=32, shuffle=True)
 
+def compute_accuracy(ourmodel, mydataloader):
+    correct = 0
+    total = 0
+    ourmodel.eval()  # Set the model to evaluation mode
+    with torch.no_grad():  # No need to track gradients when evaluating
+        for batch in mydataloader:
+            data_labels = batch[:, 0].unsqueeze(1)
+            batch_data = batch[:, 1:]
+
+            real_labels = data_labels.view(-1, 1, 1, 1).repeat(1, 1, 1, model.sequence_length)
+            data = batch_data.view(-1, 1, 1, batch_data.shape[1])
+
+            outputs = ourmodel(data)
+            
+            # Assuming outputs are probabilities and you're using a threshold of 0.5
+            predicted = (outputs > 0.5).float()
+            
+            total += data_labels.size(0)
+            correct += (predicted == data_labels).sum().item()
+
+    ourmodel.train()  # Set the model back to training mode
+    return 100 * correct / total
+
 for epoch in range(num_epochs):
-    print(epoch)
+
+    epoch_loss = 0  # Initialize the epoch's loss to zero
+
     # for each batch of data in your dataset:
     for batch in dataset:  # Replace 'dataloader' with your data loader
-
-        print(batch)
         data_labels = batch[:, 0].unsqueeze(1)
         batch_data = batch[:, 1:]
-        real_data = model.generator.autoencoder.encode(batch_data).reshape(-1, 1, model.discriminator.output_dim*model.discriminator.output_dim_2) if isinstance(model.discriminator, AutoencoderDiscriminator) and not model.discriminator.encode else batch_data
-        real_data = torch.cat((real_data, data_labels.repeat(1, 1)), dim=-1)
+
+        real_labels = data_labels.view(-1, 1, 1, 1).repeat(1, 1, 1, model.sequence_length)
+        data = batch_data.view(-1, 1, 1, batch_data.shape[1])
+        validity_real = ourmodel(data)
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        
+
         # Forward pass
-        outputs = ourmodel(real_data)
+        outputs = ourmodel(data)
         
         # Compute Loss
         loss = criterion(outputs, data_labels)
-        
+        epoch_loss+=loss
+
         # Backward pass and optimize
         loss.backward()
         optimizer.step()
+        
+
+    average_loss = epoch_loss / len(dataset)
+    
+    # Print the epoch and average loss
+    print(f"Epoch [{epoch + 1}/{num_epochs}] - Loss: {average_loss:.4f}")
+test_accuracy = compute_accuracy(ourmodel, testset)
+print(f"Epoch [{1}/{num_epochs}] - Test Accuracy: {test_accuracy:.2f}%")
